@@ -87,7 +87,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         model: CSPNet = hydra.utils.instantiate(
             self.cfg.vectorfield, _convert_="partial"
         )
-        # Model of the vector field.
+
         cspnet = ProjectedConjugatedCSPNet(
             cspnet=model,
             manifold_getter=self.manifold_getter,
@@ -98,6 +98,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
                 cfg.data.dataset_name, self.manifold_getter.coord_manifold
             ),
         )
+
         if cfg.optim.get("ema_decay", None) is None:
             self.model = cspnet
         else:
@@ -171,7 +172,12 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         x0: torch.Tensor = None,
         num_steps: int = 1_000,
         entire_traj: bool = False,
+        neb_step: torch.Tensor = None,
+        reaction_type: torch.Tensor = None,
+        guidance_weight: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        split_manifold = True
+
         (
             x1,
             manifold,
@@ -180,26 +186,29 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             l_manifold,
             dims,
             mask_a_or_f,
+            mask_f,
         ) = self.manifold_getter(
             batch.batch,
             batch.atom_types,
             batch.frac_coords,
             batch.lengths,
             batch.angles,
-            split_manifold=True,
+            split_manifold,
+            batch.constraints,
         )
         if x0 is None:
-            if self.cfg.base_distribution_from_data:
-                x0 = self.manifold_getter(
-                    batch.batch,
-                    batch.atom_types_initial,
-                    batch.frac_coords_initial,
-                    batch.lengths_initial,
-                    batch.angles_initial,
-                    split_manifold=True,
-                )[0]
-            else:
-                x0 = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
+            x0_random = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
+
+            f_start = dims.a
+            f_end = dims.a + dims.f
+
+            B, N = mask_f.shape
+
+            mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)  # [B, N*3]
+            x0_random[:, f_start:f_end] = torch.where(
+                mask_fixed_f_flat, x1[:, f_start:f_end], x0_random[:, f_start:f_end]
+            )
+            x0 = x0_random
         else:
             x0 = x0.to(x1)
 
@@ -213,8 +222,13 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             num_atoms=batch.num_atoms,
             node2graph=batch.batch,
             mask_a_or_f=mask_a_or_f,
+            mask_f=mask_f,
             num_steps=num_steps,
             entire_traj=entire_traj,
+            neb_step=neb_step,
+            reaction_type=reaction_type,
+            guidance_weight=guidance_weight,
+            constraints=batch.constraints,
         )
 
     @torch.no_grad()
@@ -240,7 +254,6 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         num_atoms = self.manifold_getter._get_num_atoms(mask_a_or_f)
 
         if x0 is None:
-            assert not self.cfg.base_distribution_from_data, "Need to sample from the base distribution"
             x0 = manifold.random(*shape, device=node2graph.device)
         else:
             x0 = x0.to(device=node2graph.device)
@@ -283,7 +296,6 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         num_atoms = self.manifold_getter._get_num_atoms(mask_a_or_f)
 
         if x0 is None:
-            assert not self.cfg.base_distribution_from_data, "Need to sample from the base distribution"
             x0 = manifold.random(*shape, device=node2graph.device)
         else:
             x0 = x0.to(device=node2graph.device)
@@ -312,10 +324,15 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         l_manifold: VMapManifolds,
         dims: Dims,
         num_atoms: torch.LongTensor,
-        node2graph: torch.LongTensor,  # aka batch.batch
+        node2graph: torch.LongTensor,
         mask_a_or_f: torch.BoolTensor,
+        mask_f: torch.BoolTensor,
         num_steps: int,
         entire_traj: bool,
+        neb_step: torch.Tensor = None,
+        reaction_type: torch.Tensor = None,
+        guidance_weight: torch.Tensor | None = None,
+        constraints: torch.LongTensor = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         vecfield = partial(
             self.vecfield,
@@ -323,12 +340,26 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             node2graph=node2graph,
             dims=dims,
             mask_a_or_f=mask_a_or_f,
+            neb_step=neb_step,
+            reaction_type=reaction_type,
+            constraints=constraints,
         )
+
+        vecfield_unconditional = partial(
+            self.vecfield,
+            num_atoms=num_atoms,
+            node2graph=node2graph,
+            dims=dims,
+            mask_a_or_f=mask_a_or_f,
+            neb_step=None,
+            reaction_type=None,
+            constraints=constraints,
+        )
+
 
         compute_traj_velo_norms = self.cfg.integrate.get(
             "compute_traj_velo_norms", False
         )
-
         c = self.cfg.integrate.get("inference_anneal_slope", 0.0)
         b = self.cfg.integrate.get("inference_anneal_offset", 0.0)
 
@@ -349,19 +380,43 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             t: torch.Tensor, x: torch.Tensor, cond: torch.Tensor | None = None
         ) -> torch.Tensor:
             anneal_factor = self._annealing_schedule(t, c, b)
-            out = vecfield(
+            out_cond = vecfield(
                 t=torch.atleast_2d(t),
                 x=torch.atleast_2d(x),
                 manifold=manifold,
                 cond=torch.atleast_2d(cond) if isinstance(cond, torch.Tensor) else cond,
             )
+
+            out_uncond = vecfield_unconditional(
+                t=torch.atleast_2d(t),
+                x=torch.atleast_2d(x),
+                manifold=manifold,
+                cond=torch.atleast_2d(cond) if isinstance(cond, torch.Tensor) else cond,
+            )
+
+            guided_out = (1 + guidance_weight) * out_cond - guidance_weight * out_uncond
+
             if anneal_types:
-                out[:, : dims.a].mul_(anneal_factor)
+                guided_out[:, : dims.a].mul_(anneal_factor)
             if anneal_coords:
-                out[:, dims.a : -dims.l].mul_(anneal_factor)
+                guided_out[:, dims.a : -dims.l].mul_(anneal_factor)
             if anneal_lattice:
-                out[:, -dims.l :].mul_(anneal_factor)
-            return out
+                guided_out[:, -dims.l :].mul_(anneal_factor)
+
+            f_start = dims.a
+            f_end = dims.a + dims.f
+
+            B, N = mask_f.shape
+            mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)
+
+            # out is the velocity
+            guided_out[:, f_start:f_end] = torch.where(
+                mask_fixed_f_flat,
+                torch.zeros_like(guided_out[:, f_start:f_end]),
+                guided_out[:, f_start:f_end],
+            )
+
+            return guided_out
 
         if self.cfg.model.get("self_cond", False):
             x1 = projx_cond_integrator_return_last(
@@ -428,6 +483,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             # this should happen due to logic above
             return xs[0]
 
+       
     @torch.no_grad()
     def compute_exact_loglikelihood(
         self,
@@ -438,13 +494,15 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         num_steps: int = 1_000,
     ):
         """Computes the negative log-likelihood of a batch of data."""
-        x1, manifold, dims, mask_a_or_f = self.manifold_getter(
+        split_manifold = False
+        x1, manifold, dims, mask_a_or_f, mask_f = self.manifold_getter(
             batch.batch,
             batch.atom_types,
             batch.frac_coords,
             batch.lengths,
             batch.angles,
-            split_manifold=False,
+            split_manifold,
+            batch.constraints,
         )
         dim = sum(dims)
 
@@ -464,6 +522,9 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             node2graph=batch.batch,
             dims=dims,
             mask_a_or_f=mask_a_or_f,
+            neb_step=batch.neb_step,
+            reaction_type=batch.reaction_type,
+            constraints=batch.constraints,
         )
 
         def odefunc(t, tensor):
@@ -548,6 +609,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
     def rfm_loss_fn(
         self, batch: Data, x0: torch.Tensor = None
     ) -> dict[str, torch.Tensor]:
+        split_manifold = True
         (
             x1,
             manifold,
@@ -556,26 +618,19 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             l_manifold,
             dims,
             mask_a_or_f,
+            mask_f,
         ) = self.manifold_getter(
             batch.batch,
             batch.atom_types,
             batch.frac_coords,
             batch.lengths,
             batch.angles,
-            split_manifold=True,
+            split_manifold,
+            batch.constraints,
         )
+
         if x0 is None:
-            if self.cfg.base_distribution_from_data:
-                x0 = self.manifold_getter(
-                    batch.batch,
-                    batch.atom_types_initial,
-                    batch.frac_coords_initial,
-                    batch.lengths_initial,
-                    batch.angles_initial,
-                    split_manifold=True,
-                )[0]
-            else:
-                x0 = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
+            x0 = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
 
         vecfield = partial(
             self.vecfield,
@@ -583,6 +638,9 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             node2graph=batch.batch,
             dims=dims,
             mask_a_or_f=mask_a_or_f,
+            neb_step=batch.neb_step,
+            reaction_type=batch.reaction_type,
+            constraints=batch.constraints,
         )
 
         N = x1.shape[0]
@@ -777,34 +835,38 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         self,
         batch: Data,
         num_steps: int = 1_000,
+        neb_step: torch.Tensor | None = None,
+        reaction_type: torch.Tensor | None = None,
+        guidance_weight: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor | Data]:
-        *_, dims, mask_a_or_f = self.manifold_getter(
+        split_manifold = False
+
+        *_, dims, mask_a_or_f, mask_f = self.manifold_getter(
             batch.batch,
             batch.atom_types,
             batch.frac_coords,
             batch.lengths,
             batch.angles,
-            split_manifold=False,
+            split_manifold,
+            batch.constraints,
         )
-        if self.cfg.base_distribution_from_data:
-            x0 = self.manifold_getter(
-                batch.batch,
-                batch.atom_types_initial,
-                batch.frac_coords_initial,
-                batch.lengths_initial,
-                batch.angles_initial,
-                split_manifold=True,
-            )[0]
-        else:
-            x0 = None
-
         if self.cfg.integrate.get("compute_traj_velo_norms", False):
             recon, norms_a, norms_f, norms_l = self.sample(
-                batch, num_steps=num_steps, x0=x0
+                batch,
+                num_steps=num_steps,
+                neb_step=neb_step,
+                reaction_type=reaction_type,
+                guidance_weight=guidance_weight,
             )
             norms = {"norms_a": norms_a, "norms_f": norms_f, "norms_l": norms_l}
         else:
-            recon = self.sample(batch, num_steps=num_steps, x0=x0)
+            recon = self.sample(
+                batch,
+                num_steps=num_steps,
+                neb_step=neb_step,
+                reaction_type=reaction_type,
+                guidance_weight=guidance_weight,
+            )
             norms = {}
         atom_types, frac_coords, lattices = self.manifold_getter.flatrep_to_crystal(
             recon, dims, mask_a_or_f
@@ -827,17 +889,24 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         batch: Data,
         num_steps: int = 1_000,
     ) -> dict[str, torch.Tensor | Data]:
-        *_, dims, mask_a_or_f = self.manifold_getter(
+        split_manifold = False
+
+        *_, dims, mask_a_or_f, mask_f = self.manifold_getter(
             batch.batch,
             batch.atom_types,
             batch.frac_coords,
             batch.lengths,
             batch.angles,
-            split_manifold=False,
+            split_manifold,
+            batch.constraints,
         )
         if self.cfg.integrate.get("compute_traj_velo_norms", False):
             recon, norms_a, norms_f, norms_l = self.sample(
-                batch, num_steps=num_steps, entire_traj=True
+                batch,
+                num_steps=num_steps,
+                entire_traj=True,
+                neb_step=batch.neb_step,
+                reaction_type=batch.reaction_type,
             )
             norms = {"norms_a": norms_a, "norms_f": norms_f, "norms_l": norms_l}
         else:
@@ -878,27 +947,13 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             batch.batch, dim_coords, split_manifold=False
         )
 
-        if self.cfg.base_distribution_from_data:
-            x0 = self.manifold_getter(
-                batch.batch,
-                batch.atom_types_initial,
-                batch.frac_coords_initial,
-                batch.lengths_initial,
-                batch.angles_initial,
-                split_manifold=True,
-            )[0]
-        else:
-            x0 = None
-
         if self.cfg.integrate.get("compute_traj_velo_norms", False):
             recon, norms_a, norms_f, norms_l = self.gen_sample(
-                batch.batch, dim_coords, num_steps=num_steps, x0=x0
+                batch.batch, dim_coords, num_steps=num_steps
             )
             norms = {"norms_a": norms_a, "norms_f": norms_f, "norms_l": norms_l}
         else:
-            recon = self.gen_sample(
-                batch.batch, dim_coords, num_steps=num_steps, x0=x0
-            )
+            recon = self.gen_sample(batch.batch, dim_coords, num_steps=num_steps)
             norms = {}
         atom_types, frac_coords, lattices = self.manifold_getter.flatrep_to_crystal(
             recon, dims, mask_a_or_f
@@ -1040,6 +1095,10 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             test_metric.reset()
 
     def predict_step(self, batch: Any, batch_idx: int):
+        neb_step = getattr(self.cfg, "neb_step", None)
+        reaction_type = getattr(self.cfg, "reaction_type", None)
+        guidance_weight = getattr(self.cfg, "guidance_weight", None)
+
         if not hasattr(batch, "frac_coords"):
             if "null" in self.cfg.model.manifold_getter.atom_type_manifold:
                 if self.cfg.integrate.get("entire_traj", False):
@@ -1049,6 +1108,9 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
                         batch,
                         dim_coords=self.cfg.data.get("dim_coords", 3),
                         num_steps=self.cfg.integrate.get("num_steps", 1_000),
+                        neb_step=neb_step,
+                        reaction_type=reaction_type,
+                        guidance_weight=guidance_weight,
                     )
             else:
                 if self.cfg.integrate.get("entire_traj", False):
@@ -1069,11 +1131,17 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
                 return self.compute_recon_trajectory(
                     batch,
                     num_steps=self.cfg.integrate.get("num_steps", 1_000),
+                    neb_step=neb_step,
+                    reaction_type=reaction_type,
+                    guidance_weight=guidance_weight,
                 )
             else:
                 return self.compute_reconstruction(
                     batch,
                     num_steps=self.cfg.integrate.get("num_steps", 1_000),
+                    neb_step=neb_step,
+                    reaction_type=reaction_type,
+                    guidance_weight=guidance_weight,
                 )
 
     def configure_optimizers(self):

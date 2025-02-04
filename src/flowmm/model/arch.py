@@ -9,6 +9,7 @@ from geoopt import Manifold
 from torch import nn
 from torch_geometric.utils import dense_to_sparse
 from torch_scatter import scatter
+from torch.cuda.amp import autocast
 
 from diffcsp.common.data_utils import lattice_params_to_matrix_torch, radius_graph_pbc
 from diffcsp.pl_modules.cspnet import CSPLayer as DiffCSPLayer
@@ -71,7 +72,7 @@ class CSPLayer(DiffCSPLayer):
 
         self.represent_num_atoms = represent_num_atoms
         if represent_num_atoms:
-            self.one_hot_dim = 100  # largest cell of atoms that we'd represent, this is safe for a HACK
+            self.one_hot_dim = 103  # largest cell of atoms that we'd represent, this is safe for a HACK
             self.num_atom_embedding = nn.Linear(
                 self.one_hot_dim, hidden_dim, bias=False
             )
@@ -128,6 +129,7 @@ class CSPLayer(DiffCSPLayer):
         non_zscored_lattice: torch.Tensor | None,
         non_zscored_lattice_pred: torch.Tensor | None,
     ):
+
         hi, hj = node_features[edge_index[0]], node_features[edge_index[1]]
         edge_features = []
         if self.represent_angle_edge_to_lattice:
@@ -193,13 +195,15 @@ class CSPLayer(DiffCSPLayer):
         lattices_flat_edges = lattices_flat[edge2graph]
 
         edge_features.extend([hi, hj, lattices_flat_edges, frac_diff])
-        if self.represent_num_atoms:
-            one_hot = torch.nn.functional.one_hot(
-                num_atoms, num_classes=self.one_hot_dim
-            ).to(dtype=hi.dtype)
-            num_atoms_rep = self.num_atom_embedding(one_hot)[edge2graph]
-            edge_features.append(num_atoms_rep)
-        return self.edge_mlp(torch.cat(edge_features, dim=1))
+        with torch.no_grad():
+            with autocast():
+                if self.represent_num_atoms:
+                    one_hot = torch.nn.functional.one_hot(
+                        num_atoms[edge2graph], num_classes=self.one_hot_dim
+                    ).to(dtype=hi.dtype)
+                    num_atoms_rep = self.num_atom_embedding(one_hot)
+                    edge_features.append(num_atoms_rep)
+                return self.edge_mlp(torch.cat(edge_features, dim=1))
 
     def forward(
         self,
@@ -251,6 +255,9 @@ class CSPNet(DiffCSPNet):
         represent_angle_edge_to_lattice: bool = False,
         self_edges: bool = True,
         self_cond: bool = False,
+        max_neb_steps: int = 10,
+        num_reaction_types: int = 5,
+        embedding_dim: int = 128,
     ):
         nn.Module.__init__(self)
         assert not (
@@ -267,10 +274,17 @@ class CSPNet(DiffCSPNet):
         else:
             coef = 1
 
+        self.neb_step_embedding = nn.Embedding(
+            num_embeddings=max_neb_steps, embedding_dim=embedding_dim
+        )
+        self.reaction_type_embedding = nn.Embedding(
+            num_embeddings=num_reaction_types, embedding_dim=embedding_dim
+        )
+
         self.node_embedding = nn.Linear(
             dim_atomic_rep * coef,
             hidden_dim,
-            bias=False,  # diffcsp's version has a bias in the embedding
+            bias=False,
         )
         self.atom_latent_emb = nn.Linear(hidden_dim + time_dim, hidden_dim, bias=False)
         if act_fn == "silu":
@@ -300,24 +314,24 @@ class CSPNet(DiffCSPNet):
             num_pools = 2
         else:
             num_pools = 1
-        # it makes sense to have no bias here since p(F) is translation invariant
-        self.coord_out = nn.Linear(hidden_dim, n_space, bias=False)
-        if (
-            ("spd" in lattice_manifold)
-            or lattice_manifold == "lattice_params"
-            or lattice_manifold == "lattice_params_normal_base"
-        ):
-            self.lattice_out = nn.Linear(
-                num_pools * hidden_dim, SPDGivenN.vecdim(n_space)
-            )
-        elif lattice_manifold == "non_symmetric":
-            # diffcsp doesn't have a bias on lattice outputs
-            self.lattice_out = nn.Linear(
-                num_pools * hidden_dim, n_space**2, bias=False
-            )
-        else:
-            raise ValueError()
 
+        # Added
+        if lattice_manifold == "non_symmetric":
+            lattice_output_dim = n_space * n_space
+        elif "spd" in lattice_manifold:
+            lattice_output_dim = SPDGivenN.vecdim(n_space)
+        elif lattice_manifold in ["lattice_params", "lattice_params_normal_base"]:
+            lattice_output_dim = LatticeParams.dim(n_space)
+        else:
+            raise ValueError(f"Unsupported lattice_manifold: {lattice_manifold}")
+
+        # Calculate input_dim including embeddings
+        input_dim = num_pools * hidden_dim + 2 * embedding_dim
+
+        # Initialize lattice_out once with correct dimensions
+        self.lattice_out = nn.Linear(input_dim, lattice_output_dim)
+
+        self.coord_out = nn.Linear(hidden_dim, n_space, bias=False)
         self.cutoff = cutoff
         self.max_neighbors = max_neighbors
         self.ln = ln
@@ -405,7 +419,10 @@ class CSPNet(DiffCSPNet):
         num_atoms,
         node2graph,
         non_zscored_lattice,
+        neb_step: torch.Tensor = None,
+        reaction_type: torch.Tensor = None,
     ):
+
         t_emb = self.time_emb(t)
         t_emb = t_emb.expand(
             num_atoms.shape[0], -1
@@ -432,7 +449,6 @@ class CSPNet(DiffCSPNet):
             l = None
             l_pred = None
 
-        # neural network
         node_features = self.node_embedding(atom_types)
         t_per_atom = t_emb.repeat_interleave(num_atoms, dim=0)
         node_features = torch.cat([node_features, t_per_atom], dim=1)
@@ -465,6 +481,47 @@ class CSPNet(DiffCSPNet):
             )
         else:
             graph_features = scatter(node_features, node2graph, dim=0, reduce="mean")
+
+        ## Add conditional addition of neb_step and reaction_type
+        include_embeddings = torch.rand(1).item() < 0.9
+
+        if isinstance(neb_step, int):
+            B = graph_features.shape[0]
+            neb_step_list = None
+            reaction_type_list = None
+
+            if neb_step is not None:
+                neb_step_list = [neb_step] * B
+
+            if reaction_type is not None:
+                reaction_type_list = [reaction_type] * B
+
+            neb_step = neb_step_list
+            reaction_type = reaction_type_list
+
+        if include_embeddings and neb_step is not None and reaction_type is not None:
+            neb_step = torch.tensor(
+                neb_step, dtype=torch.long, device=atom_types.device
+            )
+            reaction_type = torch.tensor(
+                reaction_type, dtype=torch.long, device=atom_types.device
+            )
+
+            # Get embeddings
+            neb_step_emb = self.neb_step_embedding(neb_step)
+            reaction_type_emb = self.reaction_type_embedding(reaction_type)
+        else:
+            device = atom_types.device
+            neb_dim = self.neb_step_embedding.embedding_dim
+            reaction_dim = self.reaction_type_embedding.embedding_dim
+            B = graph_features.shape[0]
+            neb_step_emb = torch.zeros((B, neb_dim), device=device)
+            reaction_type_emb = torch.zeros((B, reaction_dim), device=device)
+
+        graph_features = torch.cat(
+            [graph_features, neb_step_emb, reaction_type_emb], dim=1
+        )
+
         lattice_out = self.lattice_out(graph_features)
         if self.lattice_manifold == "non_symmetric":
             lattice_out = lattice_out.view(-1, self.n_space, self.n_space)
@@ -526,9 +583,12 @@ class ProjectedConjugatedCSPNet(nn.Module):
         node2graph: torch.LongTensor,  # known in DiffCSP as batch
         dims: Dims,
         mask_a_or_f: torch.BoolTensor,
+        constraints: torch.LongTensor,  # known
         t: torch.Tensor,
         x: torch.Tensor,
         cond: torch.Tensor | None,
+        neb_step: torch.Tensor = None,
+        reaction_type: torch.Tensor = None,
     ) -> ManifoldGetterOut:
         atom_types, frac_coords, lattices = self.manifold_getter.flatrep_to_georep(
             x,
@@ -579,6 +639,8 @@ class ProjectedConjugatedCSPNet(nn.Module):
             num_atoms,
             node2graph,
             non_zscored_lattice,
+            neb_step=neb_step,
+            reaction_type=reaction_type,
         )
 
         # z-score outputs
@@ -599,6 +661,7 @@ class ProjectedConjugatedCSPNet(nn.Module):
             frac_coords=coord_out,
             lattices=lattice_out,
             split_manifold=False,
+            constraints=constraints,
         )
 
     def forward(
@@ -607,10 +670,13 @@ class ProjectedConjugatedCSPNet(nn.Module):
         node2graph: torch.LongTensor,
         dims: Dims,
         mask_a_or_f: torch.BoolTensor,
+        constraints: torch.LongTensor,
         t: torch.Tensor,
         x: torch.Tensor,
         manifold: Manifold,
         cond: torch.Tensor | None = None,
+        neb_step: torch.Tensor = None,
+        reaction_type: torch.Tensor = None,
     ) -> torch.Tensor:
         """u_t: [0, 1] x M -> T M
 
@@ -621,7 +687,16 @@ class ProjectedConjugatedCSPNet(nn.Module):
         if cond is not None:
             cond = manifold.projx(cond)
         v, *_ = self._conjugated_forward(
-            num_atoms, node2graph, dims, mask_a_or_f, t, x, cond
+            num_atoms,
+            node2graph,
+            dims,
+            mask_a_or_f,
+            constraints,
+            t,
+            x,
+            cond,
+            neb_step=neb_step,
+            reaction_type=reaction_type,
         )
         v = manifold.proju(x, v)
 

@@ -41,7 +41,7 @@ from flowmm.rfm.vmap import VMapManifolds
 
 Dims = namedtuple("Dims", ["a", "f", "l"])
 ManifoldGetterOut = namedtuple(
-    "ManifoldGetterOut", ["flat", "manifold", "dims", "mask_a_or_f"]
+    "ManifoldGetterOut", ["flat", "manifold", "dims", "mask_a_or_f", "mask_f"]
 )
 SplitManifoldGetterOut = namedtuple(
     "SplitManifoldGetterOut",
@@ -53,6 +53,7 @@ SplitManifoldGetterOut = namedtuple(
         "l_manifold",
         "dims",
         "mask_a_or_f",
+        "mask_f"
     ],
 )
 GeomTuple = namedtuple("GeomTuple", ["a", "f", "l"])
@@ -91,6 +92,7 @@ class ManifoldGetter(torch.nn.Module):
         self.analog_bits_scale = analog_bits_scale
         self.length_inner_coef = length_inner_coef
         self.dataset = dataset
+
 
     @property
     def predict_atom_types(self):
@@ -138,12 +140,19 @@ class ManifoldGetter(torch.nn.Module):
         batch: torch.LongTensor,
         atom_types: torch.LongTensor,
         frac_coords: torch.Tensor,
+        constraints: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.BoolTensor]:
         a, mask_a_or_f = to_dense_batch(
             x=atom_types, batch=batch
         )  # B x N x NUM_ATOMIC_TYPES, B x N
         f, _ = to_dense_batch(x=frac_coords, batch=batch)  # B x N x 3
-        return a, f, mask_a_or_f
+    
+        B, N = mask_a_or_f.shape  # mask_a_or_f => [B, N]
+        
+        constraints_2d = constraints.view(B, N) 
+        mask_f = constraints_2d.bool()
+
+        return a, f, mask_a_or_f, mask_f
 
     def _to_flat(
         self,
@@ -164,6 +173,7 @@ class ManifoldGetter(torch.nn.Module):
         frac_coords: torch.Tensor,
         lattices: torch.Tensor,
         split_manifold: bool,
+        constraints: torch.Tensor = None,
     ) -> (
         tuple[
             torch.Tensor,
@@ -177,15 +187,16 @@ class ManifoldGetter(torch.nn.Module):
         | tuple[torch.Tensor, VMapManifolds, Dims, torch.BoolTensor]
     ):
         """converts from georep to the manifold flatrep"""
-        a, f, mask_a_or_f = self._to_dense(
-            batch, atom_types=atom_types, frac_coords=frac_coords
+        a, f, mask_a_or_f, mask_f = self._to_dense(
+            batch, atom_types=atom_types, frac_coords=frac_coords, constraints=constraints
         )
+        
         num_atoms = self._get_num_atoms(mask_a_or_f)
         *manifolds, dims = self.get_manifolds(
             num_atoms,
             atom_types_dense_one_hot=a,
             dim_coords=frac_coords.shape[-1],
-            split_manifold=split_manifold,
+            split_manifold=split_manifold
         )
         # manifolds = [manifold.to(device=batch.device) for manifold in manifolds]
         flat = self._to_flat(a, f, lattices, dims)
@@ -195,6 +206,7 @@ class ManifoldGetter(torch.nn.Module):
                 *manifolds,
                 dims,
                 mask_a_or_f,
+                mask_f
             )
         else:
             return ManifoldGetterOut(
@@ -202,6 +214,7 @@ class ManifoldGetter(torch.nn.Module):
                 *manifolds,
                 dims,
                 mask_a_or_f,
+                mask_f
             )
 
     def forward(
@@ -212,6 +225,7 @@ class ManifoldGetter(torch.nn.Module):
         lengths: torch.Tensor,
         angles: torch.Tensor,
         split_manifold: bool,
+        constraints: torch.Tensor = None
     ) -> (
         tuple[
             torch.Tensor,
@@ -224,6 +238,7 @@ class ManifoldGetter(torch.nn.Module):
         ]
         | tuple[torch.Tensor, VMapManifolds, Dims, torch.BoolTensor]
     ):
+
         """converts data from the loader into the georep, then to the manifold flatrep"""
         atom_types = self._convert_atom_types(atom_types)
 
@@ -240,7 +255,7 @@ class ManifoldGetter(torch.nn.Module):
             raise NotImplementedError()
 
         return self.georep_to_flatrep(
-            batch, atom_types, frac_coords, lattices, split_manifold
+            batch, atom_types, frac_coords, lattices,split_manifold, constraints
         )
 
     def _convert_atom_types(self, atom_types: torch.Tensor) -> torch.Tensor:
@@ -417,6 +432,7 @@ class ManifoldGetter(torch.nn.Module):
             EuclideanWithLogProb | SPDGivenN | LatticeParams,
         ]
     ):
+
         if atom_type_manifold == "simplex":
             a_manifold = (
                 MultiAtomFlatDirichletSimplex(
