@@ -203,11 +203,20 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             f_end = dims.a + dims.f
 
             B, N = mask_f.shape
+            
+            a_start = 0
+            a_end = dims.a
+            x0_random[:, a_start:a_end] =  x1[:, a_start:a_end]
 
-            mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)  # [B, N*3]
+            mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)  
             x0_random[:, f_start:f_end] = torch.where(
                 mask_fixed_f_flat, x1[:, f_start:f_end], x0_random[:, f_start:f_end]
             )
+            
+            l_start = dims.a + dims.f
+            l_end = dims.a + dims.f + dims.l 
+            x0_random[:, l_start:l_end] =  x1[:, l_start:l_end]
+            
             x0 = x0_random
         else:
             x0 = x0.to(x1)
@@ -406,18 +415,18 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             if anneal_lattice:
                 guided_out[:, -dims.l :].mul_(anneal_factor)
 
+            guided_out[:, :dims.a] = 0
+            
             f_start = dims.a
             f_end = dims.a + dims.f
 
-            B, N = mask_f.shape
+            # B, N = mask_f.shape
             mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)
 
-            # out is the velocity
-            guided_out[:, f_start:f_end] = torch.where(
-                mask_fixed_f_flat,
-                torch.zeros_like(guided_out[:, f_start:f_end]),
-                guided_out[:, f_start:f_end],
-            )
+            guided_out[:, f_start:f_end].masked_fill_(mask_fixed_f_flat, 0)
+            l_start = dims.a + dims.f
+            l_end = dims.a + dims.f + dims.l
+            guided_out[:, l_start:l_end] = 0
 
             return guided_out
 

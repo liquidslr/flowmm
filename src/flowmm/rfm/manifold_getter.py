@@ -147,9 +147,8 @@ class ManifoldGetter(torch.nn.Module):
         )  # B x N x NUM_ATOMIC_TYPES, B x N
         f, _ = to_dense_batch(x=frac_coords, batch=batch)  # B x N x 3
     
-        B, N = mask_a_or_f.shape  # mask_a_or_f => [B, N]
-        val = 54
-        
+        B, N = mask_a_or_f.shape  
+        val = 60
         constraints_2d = constraints.view(B, val)  # => [B, 54]
 
         if N == val:
@@ -160,8 +159,9 @@ class ManifoldGetter(torch.nn.Module):
             mask_padded = torch.zeros(B, N, dtype=torch.bool, device=constraints.device)
             mask_padded[:, :val] = constraints_2d.bool()
             mask_f = mask_padded
-
+        
         return a, f, mask_a_or_f, mask_f
+
 
     def _to_flat(
         self,

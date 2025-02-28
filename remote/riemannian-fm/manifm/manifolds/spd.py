@@ -47,22 +47,25 @@ class SPD(Manifold):
 
     def devectorize(self, x):
         size = x.shape
-        d = x.shape[-1]
-        n = self.matdim(d)
-        x = x.reshape(-1, d)
+        try:
+            d = x.shape[-1]
+            n = self.matdim(d)
+            x = x.reshape(-1, d)
 
-        def create_symm(x):
-            A = torch.zeros(n, n).to(x)
-            triu_indices = torch.triu_indices(row=n, col=n, offset=0).to(A.device)
-            A = torch.index_put(A, (triu_indices[0], triu_indices[1]), x.reshape(-1))
-            A = torch.index_put(
-                A.mT, (triu_indices[0], triu_indices[1]), x.reshape(-1)
-            ).mT
+            def create_symm(x):
+                A = torch.zeros(n, n).to(x)
+                triu_indices = torch.triu_indices(row=n, col=n, offset=0).to(A.device)
+                A = torch.index_put(A, (triu_indices[0], triu_indices[1]), x.reshape(-1))
+                A = torch.index_put(
+                    A.mT, (triu_indices[0], triu_indices[1]), x.reshape(-1)
+                ).mT
+                return A
+
+            A = vmap(create_symm)(x)
+            A = A.reshape(*size[:-1], n, n)
             return A
-
-        A = vmap(create_symm)(x)
-        A = A.reshape(*size[:-1], n, n)
-        return A
+        except:
+           return torch.tensor([])
 
     def egrad2rgrad(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
         return self.proju(x, u)

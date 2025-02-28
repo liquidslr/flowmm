@@ -26,7 +26,9 @@ from flowmm.model.model_pl import MaterialsRFMLitModule
 # https://github.com/Project-MONAI/MONAI/issues/701#issuecomment-767330310
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
+import torch.multiprocessing
 
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 try:
     WANDB_MODE = os.environ["WANDB_MODE"]

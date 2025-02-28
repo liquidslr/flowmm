@@ -486,11 +486,7 @@ class CSPNet(DiffCSPNet):
         include_embeddings = torch.rand(1).item() < 0.9
 
         if isinstance(neb_step, int):
-            # print(neb_step, "neb_step inside cspnet")
-            # print(reaction_type, "reaction_type inside cspnet")
-
             B = graph_features.shape[0]
-
             neb_step_list = None
             reaction_type_list = None
 

@@ -1117,9 +1117,9 @@ class StandardScalerTorch(object):
 
     def fit(self, X):
         if isinstance(X, torch.Tensor):
-            X = X.clone().detach()
+            X = X.clone().detach().float()
         else:
-            X = torch.tensor(X, dtype=torch.float)
+            X = torch.Tensor(X, dtype=torch.float)
         self.means = torch.mean(X, dim=0)
         # https://github.com/pytorch/pytorch/issues/29372
         self.stds = torch.std(X, dim=0, unbiased=False) + EPSILON

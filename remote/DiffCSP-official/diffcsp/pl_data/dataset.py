@@ -63,6 +63,7 @@ class CrystDataset(Dataset):
         prop = self.scaler.transform(data_dict[self.prop])
         (frac_coords, atom_types, lengths, angles, edge_indices,
          to_jimages, num_atoms) = data_dict['graph_arrays']
+        # print(data_dict, "data_dict")
 
         constraints = list(map(int, data_dict['constraints'].split(",")))
         # atom_coords are fractional coordinates

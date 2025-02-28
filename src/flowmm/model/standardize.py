@@ -118,6 +118,7 @@ def compute_affine_stats(
                 l_manifold,
                 dims,
                 mask_a_or_f,
+                mask_f
             ) = manifold_getter(
                 batch.batch,
                 batch.atom_types,

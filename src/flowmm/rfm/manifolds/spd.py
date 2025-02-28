@@ -325,6 +325,7 @@ def spd_vector_to_lattice_matrix(spd_vector: torch.Tensor) -> torch.Tensor:
 def get_spd_data(
     dataset: dataset_options, path: str | Path | None, stem: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
+
     if path is None:
         file = Path(__file__).parent / f"{stem}.yaml"
     else:
@@ -337,7 +338,6 @@ def get_spd_data(
         raise FileNotFoundError(
             f"{file=} does not exist, have you computed the mean and std already?"
         )
-
     mean = torch.tensor(stats[dataset]["mean"])
     std = torch.tensor(stats[dataset]["std"])
     return mean, std
@@ -359,7 +359,7 @@ def compute_atom_density(
     return densities.mean(), densities.std()
 
 
-@cache
+# @cache
 def get_atom_density(
     dataset: dataset_options, path: str | Path | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
