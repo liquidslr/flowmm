@@ -86,8 +86,10 @@ class ProductManifoldWithLogProb(ProductManifold):
         manifold: Manifold, x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(manifold, "geodesic"):
+            
             # specific geodesic when the implementation calls for it
             mani_geo = partial(manifold.geodesic, x0, x1)
+            
             x_t, u_t = jvp(mani_geo, (t,), (torch.ones_like(t).to(t),))
         else:
             # generic geodesic with expmap and logmap
@@ -101,12 +103,17 @@ class ProductManifoldWithLogProb(ProductManifold):
         target_batch_dim = _calculate_target_batch_dim(x0.dim(), x1.dim(), t.dim())
         x_ts, u_ts = [], []
         for i, manifold in enumerate(self.manifolds):
+            
             x0p = self.take_submanifold_value(x0, i)
             x1p = self.take_submanifold_value(x1, i)
-            x_t, u_t = self._cond_u(manifold, x0p, x1p, t)
+            # x_t, u_t = self._cond_u(manifold, x0p, x1p, t)
+            x_t = (1 - t) * x0p + t * x1p
+            u_t = x1p - x0p  # constant derivative
+        
 
             x_t = x_t.reshape((*x_t.shape[:target_batch_dim], -1))
             u_t = u_t.reshape((*u_t.shape[:target_batch_dim], -1))
+            
             x_ts.append(x_t)
             u_ts.append(u_t)
         return torch.cat(x_ts, -1), torch.cat(u_ts, -1)

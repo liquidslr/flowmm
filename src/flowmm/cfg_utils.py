@@ -13,7 +13,7 @@ from torch_geometric.loader import DataLoader
 from flowmm.model.eval_utils import get_loaders
 
 # dataset_options = Literal["carbon", "mp_20", "mpts_52", "perov", "water", "oc_20"]
-dataset_options = Literal[ "rh"]
+dataset_options = Literal[ "rh_disp"]
 
 def init_cfg(
     overrides: list[str] = [],
@@ -46,3 +46,6 @@ def init_loaders(
     print(a, "train loader")
     
     return get_loaders(cfg)
+
+
+

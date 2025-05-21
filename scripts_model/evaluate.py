@@ -78,7 +78,7 @@ def cli():
 @cli.command()
 @click.argument("checkpoint", type=Path)
 @click.option("--stage", type=click.Choice(STAGES, case_sensitive=False), default="val")
-@click.option("--batch_size", type=int, default=128)
+@click.option("--batch_size", type=int, default=16384)
 @click.option("--num_evals", type=int, default=1)
 @click.option("--limit_predict_batches", type=str, default="1.")
 @click.option("--num_steps", type=int, default=None)
@@ -168,18 +168,6 @@ def get_target_dir(checkpoint: Path, subdir: bool) -> Path:
     show_default=True,
     default=False,
 )
-@click.option(
-    "--neb_step",
-    default=None,
-)
-@click.option(
-    "--reaction_type",
-    default=None,
-)
-@click.option(
-    "--guidance_weight",
-    default=None,
-)
 def reconstruct(
     checkpoint: Path,
     stage: STAGE_TYPE,
@@ -195,9 +183,6 @@ def reconstruct(
     inference_anneal_coords: bool,
     inference_anneal_lattice: bool,
     compute_traj_velo_norms: bool | None,
-    neb_step: int | None,
-    reaction_type: int | None,
-    guidance_weight: int | None,
 ) -> None:
     cfg, model = load_model(checkpoint)
 
@@ -205,10 +190,8 @@ def reconstruct(
         raise ValueError(
             f"you cannot do reconstruction with an unconditional atom_type_manifold {cfg.model.manifold_getter.atom_type_manifold=}"
         )
-    
 
     stage = stage.lower()
-    batch_size = 128
     if batch_size is None:  # this must be explicitly set since the default is int
         batch_size = getattr(cfg.data.datamodule.batch_size, stage)
         print(f"Using {batch_size=} from default cfg")
@@ -226,17 +209,7 @@ def reconstruct(
         cfg.integrate.inference_anneal_offset = inference_anneal_offset
     if compute_traj_velo_norms:
         cfg.integrate.compute_traj_velo_norms = compute_traj_velo_norms
-    
-    if neb_step is not None:
-        cfg.neb_step = int(neb_step)
 
-    if reaction_type is not None:
-        cfg.reaction_type = int(reaction_type)
-        
-    if guidance_weight is not None:
-        cfg.guidance_weight = float(guidance_weight)
-    
-    
     cfg.integrate.inference_anneal_types = inference_anneal_types
     cfg.integrate.inference_anneal_coords = inference_anneal_coords
     cfg.integrate.inference_anneal_lattice = inference_anneal_lattice
@@ -247,7 +220,7 @@ def reconstruct(
     target_dir = get_target_dir(checkpoint, subdir)
 
     assert num_evals > 0
-    directories = [f"reconstruct_neb_{neb_step}_reaction_{reaction_type}_w_{guidance_weight}" for i in range(num_evals)]
+    directories = [f"reconstruct_{i:02d}" for i in range(num_evals)]
 
     for directory in directories:
         pred_writer = TorchPredictionWriter(
@@ -811,12 +784,9 @@ def _list_of_dicts_to_dict_of_lists(
 
 
 def _consolidate(
-    target_dir: Path, filename:str, task: TASKS_TYPE
+    target_dir: Path, task: TASKS_TYPE
 ) -> dict[str, list[dict[str, torch.Tensor | list[Data] | list[int]]]]:
-    if filename is not None:
-        pattern = f"{filename}*"
-    else:
-        pattern = f"{task}*"
+    pattern = f"{task}_??"
     directories = sorted(list(target_dir.glob(pattern)))
 
     if not directories:
@@ -832,6 +802,7 @@ def _consolidate(
         preds = sorted(list(directory.glob("predictions_??.pt")))
         batches = sorted(list(directory.glob("batch_indices_??.pt")))
         assert len(preds) == len(batches)
+
         # get and empty out
         keys = torch.load(preds[0], map_location="cpu")[0][0].keys()
         out = {k: [] for k in keys}
@@ -890,7 +861,6 @@ def _create_eval_pt(
     target_dir: Path,
     filename: str,
 ) -> Path:
-    # filename = "neb_1_reaction_type_0_w_0.0"
     # consolidated = {k: v.reshape(-1, v.shape[-1]) if k != "lattices" else v.reshape(-1, *v.shape[-2:]) for k, v in r.items()}
     if consolidated is None:
         raise ValueError(
@@ -919,28 +889,22 @@ def _create_eval_pt(
     default=None,
     help="if it is ambiguous, you can select the task for path_eval_pt",
 )
-@click.option(
-    "--filename",
-    default=None,
-    help="if it is the filename to consolidate",
-)
 def consolidate(
     checkpoint: Path,
     subdir: str,
     path_eval_pt: str | None,
     task_to_save: TASKS_TYPE | None,
-    filename: str | None,
 ) -> None:
     target_dir = get_target_dir(checkpoint, subdir)
-    r = _consolidate(target_dir, filename , "reconstruct")
-    rt = _consolidate(target_dir, filename,"recon_trajectory")
-    g = _consolidate(target_dir, filename, "generate")
-    gt = _consolidate(target_dir, filename, "gen_trajectory")
-    p = _consolidate(target_dir, filename, "pred")
+    r = _consolidate(target_dir, "reconstruct")
+    rt = _consolidate(target_dir, "recon_trajectory")
+    g = _consolidate(target_dir, "generate")
+    gt = _consolidate(target_dir, "gen_trajectory")
+    p = _consolidate(target_dir, "pred")
 
     consolidations = {k: v for k, v in zip(TASKS, [r, rt, g, gt, p])}
     did_consolidate = {k: v != None for k, v in consolidations.items()}
-    print(did_consolidate.values(), "did_consolidate.values()")
+
     if any(did_consolidate.values()):
         if task_to_save is not None:
             print(f"consolidating {task_to_save}")
@@ -1009,7 +973,7 @@ def _generation_metrics_wandb(
     consolidated_generation_path: Path,
     gt_dataset_path: Path,
     global_step: int,
-    eval_model_name: Literal["carbon", "mp20", "perovskite", "water"],
+    eval_model_name: Literal["carbon", "mp20", "perovskite"],
     n_subsamples: int,
     stage: STAGE_TYPE,
 ) -> dict[str, float]:

@@ -180,6 +180,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
 
         (
             x1,
+            x_base,
             manifold,
             a_manifold,
             f_manifold,
@@ -194,30 +195,43 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             batch.lengths,
             batch.angles,
             split_manifold,
+            batch.velocities,
             batch.constraints,
+            displace = False,
+            sample = True
         )
+        # print(batch.velocities, "batch.velocities")
+        # print(a_manifold, "a_manifold")
+        # print(f_manifold, "f_manifold")
+        
+        # print(x_base, "x_base")
+        
+        
         if x0 is None:
-            x0_random = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
+            # Change
+            # x0_random = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
+            # x0 = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
+            x0 = x_base
 
-            f_start = dims.a
-            f_end = dims.a + dims.f
+            # f_start = dims.a
+            # f_end = dims.a + dims.f
 
-            B, N = mask_f.shape
+            # B, N = mask_f.shape
             
-            a_start = 0
-            a_end = dims.a
-            x0_random[:, a_start:a_end] =  x1[:, a_start:a_end]
+            # a_start = 0
+            # a_end = dims.a
+            # x0_random[:, a_start:a_end] =  x1[:, a_start:a_end]
 
-            mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)  
-            x0_random[:, f_start:f_end] = torch.where(
-                mask_fixed_f_flat, x1[:, f_start:f_end], x0_random[:, f_start:f_end]
-            )
+            # mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)  
+            # x0_random[:, f_start:f_end] = torch.where(
+            #     mask_fixed_f_flat, x1[:, f_start:f_end], x0_random[:, f_start:f_end]
+            # )
             
-            l_start = dims.a + dims.f
-            l_end = dims.a + dims.f + dims.l 
-            x0_random[:, l_start:l_end] =  x1[:, l_start:l_end]
+            # l_start = dims.a + dims.f
+            # l_end = dims.a + dims.f + dims.l 
+            # x0_random[:, l_start:l_end] =  x1[:, l_start:l_end]
             
-            x0 = x0_random
+            # x0 = x0_random
         else:
             x0 = x0.to(x1)
 
@@ -238,6 +252,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             reaction_type=reaction_type,
             guidance_weight=guidance_weight,
             constraints=batch.constraints,
+            velocities=batch.velocities,
             gt_x1=x1,
         )
 
@@ -264,6 +279,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         num_atoms = self.manifold_getter._get_num_atoms(mask_a_or_f)
 
         if x0 is None:
+             # Change
             x0 = manifold.random(*shape, device=node2graph.device)
         else:
             x0 = x0.to(device=node2graph.device)
@@ -306,6 +322,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         num_atoms = self.manifold_getter._get_num_atoms(mask_a_or_f)
 
         if x0 is None:
+             # Change
             x0 = manifold.random(*shape, device=node2graph.device)
         else:
             x0 = x0.to(device=node2graph.device)
@@ -343,6 +360,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         reaction_type: torch.Tensor = None,
         guidance_weight: torch.Tensor | None = None,
         constraints: torch.LongTensor = None,
+        velocities: torch.LongTensor = None,
         gt_x1: torch.Tensor = None,  #
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         vecfield = partial(
@@ -354,20 +372,11 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             neb_step=neb_step,
             reaction_type=reaction_type,
             constraints=constraints,
+            velocities=velocities
         )
-
-        vecfield_unconditional = partial(
-            self.vecfield,
-            num_atoms=num_atoms,
-            node2graph=node2graph,
-            dims=dims,
-            mask_a_or_f=mask_a_or_f,
-            neb_step=None,
-            reaction_type=None,
-            constraints=constraints,
-        )
-
-        # guidance_weight = 0.0
+        
+        # print(manifold, "manifold")
+    
 
         compute_traj_velo_norms = self.cfg.integrate.get(
             "compute_traj_velo_norms", False
@@ -391,109 +400,98 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         def scheduled_fn_to_integrate(
             t: torch.Tensor, x: torch.Tensor, cond: torch.Tensor | None = None
         ) -> torch.Tensor:
-            anneal_factor = self._annealing_schedule(t, c, b)
-            out_cond = vecfield(
+            # anneal_factor = self._annealing_schedule(t, c, b)
+            out = vecfield(
                 t=torch.atleast_2d(t),
                 x=torch.atleast_2d(x),
                 manifold=manifold,
                 cond=torch.atleast_2d(cond) if isinstance(cond, torch.Tensor) else cond,
             )
+           
 
-            out_uncond = vecfield_unconditional(
-                t=torch.atleast_2d(t),
-                x=torch.atleast_2d(x),
-                manifold=manifold,
-                cond=torch.atleast_2d(cond) if isinstance(cond, torch.Tensor) else cond,
-            )
+            # if anneal_types:
+            #     out[:, : dims.a].mul_(anneal_factor)
+            # if anneal_coords:
+            #     out[:, dims.a : -dims.l].mul_(anneal_factor)
+            # if anneal_lattice:
+            #     out[:, -dims.l :].mul_(anneal_factor)
 
-            guided_out = (1 + guidance_weight) * out_cond - guidance_weight * out_uncond
-
-            if anneal_types:
-                guided_out[:, : dims.a].mul_(anneal_factor)
-            if anneal_coords:
-                guided_out[:, dims.a : -dims.l].mul_(anneal_factor)
-            if anneal_lattice:
-                guided_out[:, -dims.l :].mul_(anneal_factor)
-
-            guided_out[:, :dims.a] = 0
+            return out
+        
+        # if self.cfg.model.get("self_cond", False):
+        #     print("In 1")
             
-            f_start = dims.a
-            f_end = dims.a + dims.f
+        #     x1 = projx_cond_integrator_return_last(
+        #         manifold,
+        #         scheduled_fn_to_integrate,
+        #         x0,
+        #         t=torch.linspace(0, 1, num_steps + 1).to(x0.device),
+        #         method=self.cfg.integrate.get("method", "euler"),
+        #         projx=True,
+        #         local_coords=False,
+        #         pbar=True,
+        #     )
+        #     return x1
 
-            # B, N = mask_f.shape
-            mask_fixed_f_flat = mask_f.repeat_interleave(3, dim=1)
+        # elif entire_traj or compute_traj_velo_norms:
+        #     print("In 3")
+        #     xs, vs = projx_integrator(
+        #         manifold,
+        #         scheduled_fn_to_integrate,
+        #         x0,
+        #         t=torch.linspace(0, 1, num_steps + 1).to(x0.device),
+        #         method=self.cfg.integrate.get("method", "euler"),
+        #         projx=True,
+        #         pbar=True,
+        #     )
+        # else:
+        #     print("In 2")
+        # num_steps = 1000
+        print(num_steps, "num_steps")
+        num_steps = 1
+        x1 = projx_integrator_return_last(
+            manifold,
+            scheduled_fn_to_integrate,
+            x0,
+            t=torch.linspace(0, 1, num_steps + 1).to(x0.device),
+            method=self.cfg.integrate.get("method", "euler"),
+            projx=True,
+            local_coords=False,
+            pbar=True,
+        )
+        return x1
+        
+        # print("In here xs")
+        # return xs
 
-            guided_out[:, f_start:f_end].masked_fill_(mask_fixed_f_flat, 0)
-            l_start = dims.a + dims.f
-            l_end = dims.a + dims.f + dims.l
-            guided_out[:, l_start:l_end] = 0
+        # if compute_traj_velo_norms:
+        #     s = 0
+        #     e = dims.a
+        #     norm_a = a_manifold.inner(
+        #         xs[..., s:e], vs[..., s:e], vs[..., s:e], data_in_dim=1
+        #     )
 
-            return guided_out
+        #     s = e
+        #     e += dims.f
+        #     norm_f = f_manifold.inner(
+        #         xs[..., s:e], vs[..., s:e], vs[..., s:e], data_in_dim=1
+        #     )
 
-        if self.cfg.model.get("self_cond", False):
-            x1 = projx_cond_integrator_return_last(
-                manifold,
-                scheduled_fn_to_integrate,
-                x0,
-                t=torch.linspace(0, 1, num_steps + 1).to(x0.device),
-                method=self.cfg.integrate.get("method", "euler"),
-                projx=True,
-                local_coords=False,
-                pbar=True,
-            )
-            return x1
+        #     s = e
+        #     e += dims.l
+        #     norm_l = l_manifold.inner(
+        #         xs[..., s:e], vs[..., s:e], vs[..., s:e], data_in_dim=1
+        #     )
 
-        elif entire_traj or compute_traj_velo_norms:
-            xs, vs = projx_integrator(
-                manifold,
-                scheduled_fn_to_integrate,
-                x0,
-                t=torch.linspace(0, 1, num_steps + 1).to(x0.device),
-                method=self.cfg.integrate.get("method", "euler"),
-                projx=True,
-                pbar=True,
-            )
-        else:
-            x1 = projx_integrator_return_last(
-                manifold,
-                scheduled_fn_to_integrate,
-                x0,
-                t=torch.linspace(0, 1, num_steps + 1).to(x0.device),
-                method=self.cfg.integrate.get("method", "euler"),
-                projx=True,
-                local_coords=False,
-                pbar=True,
-            )
-            return x1
-
-        if compute_traj_velo_norms:
-            s = 0
-            e = dims.a
-            norm_a = a_manifold.inner(
-                xs[..., s:e], vs[..., s:e], vs[..., s:e], data_in_dim=1
-            )
-
-            s = e
-            e += dims.f
-            norm_f = f_manifold.inner(
-                xs[..., s:e], vs[..., s:e], vs[..., s:e], data_in_dim=1
-            )
-
-            s = e
-            e += dims.l
-            norm_l = l_manifold.inner(
-                xs[..., s:e], vs[..., s:e], vs[..., s:e], data_in_dim=1
-            )
-
-        if entire_traj and compute_traj_velo_norms:
-            return xs, norm_a, norm_f, norm_l
-        elif entire_traj and not compute_traj_velo_norms:
-            return xs
-        elif not entire_traj and compute_traj_velo_norms:
-            return xs[0], norm_a, norm_f, norm_l
-        else:
-            # this should happen due to logic above
-            return xs[0]
+        # if entire_traj and compute_traj_velo_norms:
+        #     return xs, norm_a, norm_f, norm_l
+        # elif entire_traj and not compute_traj_velo_norms:
+        #     return xs
+        # elif not entire_traj and compute_traj_velo_norms:
+        #     return xs[0], norm_a, norm_f, norm_l
+        # else:
+        #     # this should happen due to logic above
+        #     return xs[0]
 
        
     @torch.no_grad()
@@ -622,8 +620,10 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         self, batch: Data, x0: torch.Tensor = None
     ) -> dict[str, torch.Tensor]:
         split_manifold = True
+        
         (
             x1,
+            x_base,
             manifold,
             a_manifold,
             f_manifold,
@@ -638,12 +638,14 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             batch.lengths,
             batch.angles,
             split_manifold,
+            batch.velocities,
             batch.constraints,
+            displace=True
         )
-
-        if x0 is None:
-            x0 = manifold.random(*x1.shape, dtype=x1.dtype, device=x1.device)
-
+        
+        # if x0 is None:
+        x0 = x_base
+        
         vecfield = partial(
             self.vecfield,
             num_atoms=batch.num_atoms,
@@ -653,95 +655,37 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             neb_step=batch.neb_step,
             reaction_type=batch.reaction_type,
             constraints=batch.constraints,
+            lattice_matrices=batch.lattice,
+            velocities=batch.velocities,
         )
-
+        
         N = x1.shape[0]
-
         t = torch.rand(N, dtype=x1.dtype, device=x1.device).reshape(-1, 1)
 
-        x1 = manifold.projx(x1)
-
+        x_orig = x1.clone()
+        # x1 = manifold.projx(x1)
+        
+        # Keep the orig value of x1 as we are not projecting it on the mainfold
+        # a_start = 0
+        # a_end   = dims.a
+        # f_end   = a_end + dims.f
+        # l_start = f_end
+        # l_end   = f_end + dims.l
+        
+        # x1[:,  a_start:a_end] = x_orig[:,  a_start:a_end]
+        # x1[:,  l_start:l_end] = x_orig[:, l_start:l_end]
+        
         x_t, u_t = manifold.cond_u(x0, x1, t)
         x_t = x_t.reshape(N, x0.shape[-1])
         u_t = u_t.reshape(N, x0.shape[-1])
-
-        # this projects out the mean from the tangent vectors
-        # our model cannot predict it, so keeping it in inflates the loss
-        u_t = manifold.proju(x_t, u_t)
-
-        cond = None
-        if self.cfg.model.self_cond:
-            with torch.no_grad():
-                if torch.rand((1)) < 0.5:
-                    cond = projx_integrate_xt_to_x1(
-                        manifold,
-                        lambda t, x: vecfield(
-                            t=torch.atleast_2d(t),
-                            x=torch.atleast_2d(x),
-                            manifold=manifold,
-                        ),
-                        x_t,
-                        t,
-                    ).detach_()
-
-        u_t_pred = vecfield(t=t, x=x_t, manifold=manifold, cond=cond)
+   
+        u_t_pred = vecfield(t=t, x=x_t, manifold=manifold)
         diff = u_t_pred - u_t
+        loss_f = (diff * diff).sum(dim=-1).mean() 
 
-        max_num_atoms = mask_a_or_f.size(-1)
-        dim_a_per_atom = dims.a / max_num_atoms
-        dim_f_per_atom = dims.f / max_num_atoms
-
-        if self.costs["loss_ce"] > 0.0:
-            x1_pred_t = projx_integrate_xt_to_x1(
-                manifold,
-                None,  # already computed velocity
-                x_t,
-                t,
-                u_t_pred,
-            )
-            a1_pred_t = x1_pred_t[:, : dims.a].reshape(N * max_num_atoms, -1)
-            a1 = x1[:, : dims.a].reshape(N * max_num_atoms, -1)
-            if self.manifold_getter.atom_type_manifold == "analog_bits":
-                loss_ce = torch.einsum("bi,bi->b", a1_pred_t, a1).reshape(
-                    N, max_num_atoms
-                )
-                loss_ce = torch.nn.functional.logsigmoid(loss_ce) * mask_a_or_f
-            elif self.manifold_getter.atom_type_manifold == "simplex":
-                a1 = self.manifold_getter._inverse_atomic_one_hot(a1)
-                loss_ce = torch.nn.functional.cross_entropy(
-                    a1_pred_t,
-                    a1,
-                    reduce=False,
-                ).reshape(N, max_num_atoms)
-                loss_ce = loss_ce * mask_a_or_f
-            else:
-                raise ValueError(
-                    f"{self.manifold_getter.atom_type_manifold=} cannot do cross entropy"
-                )
-            loss_ce = (loss_ce.sum(dim=-1) / mask_a_or_f.sum(dim=-1)).mean()
-        else:
-            loss_ce = torch.Tensor([0.0]).squeeze().to(diff)
-
-        s = 0
-        e = dims.a
-        loss_a = (
-            a_manifold.inner(x_t[:, s:e], diff[:, s:e], diff[:, s:e]).mean()
-            / dim_a_per_atom
-        )  # per dim, already per atom
-
-        s = e
-        e += dims.f
-        loss_f = (
-            f_manifold.inner(x_t[:, s:e], diff[:, s:e], diff[:, s:e]).mean()
-            / dim_f_per_atom
-        )  # per dim, already per atom
-
-        s = e
-        e += dims.l
-        loss_l = (
-            l_manifold.inner(x_t[:, s:e], diff[:, s:e], diff[:, s:e]).mean() / dims.l
-        )  # per dim
-
+        loss_a = 0 
+        loss_l = 0 
+        loss_ce = 0 
         loss = (
             self.costs["loss_a"] * loss_a
             + self.costs["loss_f"] * loss_f
@@ -773,7 +717,10 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
                     v,
                     batch_size=batch.batch_size,
                 )
-                self.train_metrics[k].update(v.cpu())
+                if torch.is_tensor(v):
+                    self.train_metrics[k].update(v.cpu())
+                else:
+                    self.train_metrics[k].update(torch.tensor(v).cpu())
         else:
             # skip step if loss is NaN.
             print(f"Skipping iteration because loss is {loss_dict['loss'].item()}.")
@@ -812,7 +759,10 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
                     prog_bar=True,
                     batch_size=batch.batch_size,
                 )
-                metrics[k].update(v.cpu())
+                if torch.is_tensor(v):
+                    metrics[k].update(v.cpu())
+                else:
+                    metrics[k].update(torch.tensor(v).cpu())
             out.update(loss_dict)
 
         if compute_nll:
@@ -860,6 +810,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
             batch.lengths,
             batch.angles,
             split_manifold,
+            batch.velocities,
             batch.constraints,
         )
         if self.cfg.integrate.get("compute_traj_velo_norms", False):
@@ -1110,7 +1061,7 @@ class MaterialsRFMLitModule(ManifoldFMLitModule):
         neb_step = getattr(self.cfg, "neb_step", None)
         reaction_type = getattr(self.cfg, "reaction_type", None)
         guidance_weight = getattr(self.cfg, "guidance_weight", None)
-
+        
         if not hasattr(batch, "frac_coords"):
             if "null" in self.cfg.model.manifold_getter.atom_type_manifold:
                 if self.cfg.integrate.get("entire_traj", False):
